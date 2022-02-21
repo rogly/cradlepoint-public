@@ -1,0 +1,543 @@
+## =================== VERSION ===================
+AWSTemplateFormatVersion: '2010-09-09'
+
+## =================== DESCRIPTION ===================
+Description: >-
+  Deploy Cradlepoint Automation Application and all related resources
+
+## =================== METADATA ===================
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+    -
+      Label:
+        default: "Release Version"
+      Parameters:
+        - AppVersion
+    -
+      Label:
+        default: "Allowed IPs"
+      Parameters:
+        - IPWhitelist
+    -
+      Label:
+        default: "S3 Buckets"
+      Parameters:
+        - RepositoryBucket
+        - WebsiteBucket
+    -
+      Label: 
+        default: "Secrets"
+      Parameters:
+        - CradlepointSecret
+        - LogicMonitorSecret
+        - SmartsheetSecret
+    ParameterLabels:
+      AppVersion:
+        default: "Version"
+      IPWhitelist:
+        default: "IP CIDR"
+      RepositoryBucket:
+        default: "Repository Bucket"
+      WebsiteBucket:
+        default: "Website Bucket"
+      CradlepointSecret:
+        default: "Cradlepoint Secret"
+      LogicMonitorSecret:
+        default: "LogicMonitor Secret"
+      SmartsheetSecret:
+        default: "Smartsheet Secret"
+
+## =================== PARAMETERS ===================
+Parameters:
+  AppVersion: 
+    Type: String
+    Description: Enter the release version to publish from the repository
+    Default: "v1.0"
+  RepositoryBucket:
+    Type: String
+    Description: Enter the S3 Bucket Name of your repository
+  WebsiteBucket:
+    Type: String
+    Description: Enter the S3 Bucket Name to create for your website
+  IPWhitelist:
+    Type: String
+    Description: Enter IP Address CIDR allowed to access Website
+  CradlepointSecret:
+    Type: String
+    Description: Paste JSON Document for Cradlepoint API Keys
+  LogicMonitorSecret:
+    Type: String
+    Description: Paste JSON Document for LogicMonitor API Keys
+  SmartsheetSecret:
+    Type: String
+    Description: Paste JSON Document for Smartsheet API Keys
+
+## =================== RESOURCES ===================
+Resources:
+  
+  ## =================== IAM Policies ===================
+  s3CopyPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: s3-copy-policy
+      Description: Provides S3 Access to copy objects from one bucket to another
+      Path: /
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 
+              - 's3:GetObject'
+              - 's3:ListBucket'
+              - 's3:GetObjectVersion'
+            Resource: '*'
+          - Effect: Allow
+            Action: 
+              - 's3:*'
+            Resource: !Sub
+            - 'arn:aws:s3:::${s3BucketName}/*'
+            - s3BucketName: !Ref WebsiteBucket
+  basicLambdaPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: basic-lambda-policy
+      Description: Basic Lambda Policy. Provides Cloudwatch and Secrets Manager Access (lambda/*)
+      Path: /
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 
+              - 'secretsmanager:GetResourcePolicy'
+              - 'secretsmanager:GetSecretValue'
+              - 'secretsmanager:DescribeSecret'
+              - 'secretsmanager:ListSecretVersionIds'
+              - 'secretsmanager:GetRandomPassword'
+              - 'secretsmanager:ListSecrets'
+            Resource: 'arn:aws:secretsmanager:*:*:secret:lambda/*'
+          - Effect: Allow
+            Action: 
+              - 'secretsmanager:GetRandomPassword'
+              - 'secretsmanager:ListSecrets'
+            Resource: '*'
+          - Effect: Allow
+            Action: 
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+            Resource: 'arn:aws:logs:*:*:log-group:/aws/lambda/*:*'
+          - Effect: Allow
+            Action: 
+              - 'logs:CreateLogGroup'
+            Resource: 'arn:aws:logs:*:*:*'
+  invokeOtherLambdaPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: invoke-other-lambda-policy
+      Description: Allows Lambda Function to Invoke other Lambda Functions
+      Path: /
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 
+              - 'lambda:InvokeFunction'
+              - 'lambda:InvokeAsync'
+            Resource: 'arn:aws:lambda:*:*:function:*'
+  
+  ## =================== IAM Roles ===================
+  s3CopyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: Role for s3-copy-lambda function
+      ManagedPolicyArns: 
+        - !Ref basicLambdaPolicy
+        - !Ref s3CopyPolicy
+      RoleName: s3-copy-role
+  apiHandlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: Role for api-handler-lambda function
+      ManagedPolicyArns: 
+        - !Ref basicLambdaPolicy
+        - !Ref invokeOtherLambdaPolicy
+      RoleName: api-handler-role
+  deployRouterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: Role for deploy-router-lambda function
+      ManagedPolicyArns: 
+        - !Ref basicLambdaPolicy
+      RoleName: deploy-router-role
+  
+  ## =================== Secrets ===================
+  cradlepointSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: lambda/cradlepoint
+      Description: CradlePoint API Keys
+      SecretString: !Ref CradlepointSecret
+  logicmonitorSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: lambda/logicmonitor
+      Description: LogicMonitor API Keys
+      SecretString: !Ref LogicMonitorSecret
+  smartsheetSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: lambda/smartsheet
+      Description: Smartsheet API Keys
+      SecretString: !Ref SmartsheetSecret
+  
+  ## =================== S3 Buckets ===================
+  StaticWebsiteBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref WebsiteBucket
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+  StaticWebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StaticWebsiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub
+            - 'arn:aws:s3:::${s3BucketName}/*'
+            - s3BucketName: !Ref WebsiteBucket
+            Condition:
+              IpAddress: 
+                aws:SourceIp: !Ref IPWhitelist
+  
+  ## =================== Lambdas ===================
+  s3CopyFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: s3-copy-lambda
+      Runtime: python3.9
+      Role: !GetAtt s3CopyRole.Arn
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def lambda_handler(event, context):
+              properties = event['ResourceProperties']
+              prefix = properties['Prefix']
+              sBucket = properties['Source']
+              dBucket = properties['Destination']
+              try:
+                  client = boto3.client('s3')
+                  s3 = boto3.resource('s3')
+                  response = client.list_objects_v2(Bucket=sBucket, Prefix=prefix)
+                  for object in response['Contents']:
+                      newKey = object['Key'].split('/')
+                      copy_source = {
+                      'Bucket': sBucket,
+                      'Key': object['Key']
+                      }
+                      bucket = s3.Bucket(dBucket)
+                      bucket.copy(copy_source, newKey[-1])
+              
+              except Exception as e:
+                  print(e)
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {"Response": 'Failure'})
+                  return
+              
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {"Response": 'Success'})
+      Description: Copy Objects from one bucket to another
+      Timeout: 60
+  s3UpdateFormLogic:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: update-form-logic-lambda
+      Runtime: python3.9
+      Role: !GetAtt s3CopyRole.Arn
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def lambda_handler(event, context):
+              properties = event['ResourceProperties']
+              apiId = properties['API_ID']
+              bucket = properties['BucketName']
+              try:
+                  s3 = boto3.resource('s3')
+                  data = """
+          var API_ENDPOINT = 'https://""" + apiId + """.execute-api.us-east-1.amazonaws.com/cradlepoint/routers';
+
+          // Setup divs that will be used to display interactive messages
+          var errorDiv = document.getElementById('error-message')
+          var successDiv = document.getElementById('success-message')
+          var resultsDiv = document.getElementById('results-message')
+
+          // Setup easy way to reference values of the input boxes
+          function deviceName() { return document.getElementById('deviceName').value }
+          function ipAddr() { return document.getElementById('ipAddr').value }
+          function macAddr() { return document.getElementById('macAddr').value }
+
+          function clearNotifications() {
+              // Clear any exisiting notifications in the browser notifications divs
+              errorDiv.textContent = '';
+              resultsDiv.textContent = '';
+              successDiv.textContent = '';
+          }
+
+          // Add listeners for each button that make the API request
+          document.getElementById('submitButton').addEventListener('click', function(e) {
+              sendData(e);
+          });
+
+          function sendData (e) {
+              // Prevent the page reloading and clear exisiting notifications
+              e.preventDefault()
+              clearNotifications()
+              // Prepare the appropriate HTTP request to the API with fetch
+              // create uses the root /prometheon endpoint and requires a JSON payload
+
+              var myHeaders = new Headers();
+              myHeaders.append("Content-Type", "application/json");
+
+              var raw = JSON.stringify({
+              "deviceName": deviceName(),
+              "macAddr": macAddr(),
+              "ipAddr": ipAddr()
+              });
+
+              var requestOptions = {
+              method: 'POST',
+              headers: myHeaders,
+              body: raw,
+              mode: 'cors',
+              redirect: 'follow'
+              };
+
+              fetch(API_ENDPOINT, requestOptions)
+              .then(response => response.json())
+              .then(json => resultsDiv.textContent = json)
+              .catch(err => resultsDiv.textContent = err); 
+              };"""
+              
+                  object = s3.Object(bucket, 'formlogic.js')
+                  result = object.put(Body=data)
+
+              except Exception as e:
+                  print(e)
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {"Response": 'Failure'})
+                  return
+              
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {"Response": 'Success'})
+      Description: Update API Endpoint in formlogic.js
+      Timeout: 60
+  apiHandler:
+    Type: AWS::Lambda::Function
+    DependsOn: InvokeS3Copy
+    Properties:
+      FunctionName: api-handler-lambda
+      Runtime: python3.9
+      Role: !GetAtt apiHandlerRole.Arn
+      Handler: lambda_function.lambda_handler
+      Code:
+        S3Bucket: !Ref RepositoryBucket
+        S3Key: !Sub 
+          - 'cradlepoint/${version}/lambda/api_handler.zip'
+          - version: !Ref AppVersion
+      Environment:
+        Variables:
+          DeployRouterArn: !GetAtt deployRouter.Arn
+      Description: Cradlepoint Automation API Handler.
+      Timeout: 90
+  deployRouter:
+    Type: AWS::Lambda::Function
+    DependsOn: InvokeS3Copy
+    Properties:
+      FunctionName: deploy-router-lambda
+      Runtime: python3.9
+      Role: !GetAtt deployRouterRole.Arn
+      Handler: lambda_function.lambda_handler
+      Code:
+        S3Bucket: !Ref RepositoryBucket
+        S3Key: !Sub 
+          - 'cradlepoint/${version}/lambda/deploy_router.zip'
+          - version: !Ref AppVersion
+      Description: Cradlepoint Automation Deploy Function.
+      Timeout: 60
+
+  ## =================== Custom Resources ===================
+  InvokeS3Copy:
+    Type: Custom::S3copy
+    DependsOn: StaticWebsiteBucket
+    Properties:
+      ServiceToken: !GetAtt s3CopyFunction.Arn
+      Prefix: !Sub
+        - 'cradlepoint/${version}/s3/'
+        - version: !Ref AppVersion
+      Source: !Ref RepositoryBucket
+      Destination: !Ref WebsiteBucket
+  Invokes3UpdateFormLogic:
+    Type: Custom::s3UpdateFormLogic
+    DependsOn:
+      - InvokeS3Copy
+      - apiGateway
+    Properties:
+      ServiceToken: !GetAtt s3UpdateFormLogic.Arn
+      API_ID: !Ref apiGateway
+      BucketName: !Ref WebsiteBucket
+  lambdaApiGatewayInvoke:
+    Type: AWS::Lambda::Permission
+    DependsOn: 
+      - apiHandler
+      - apiGateway
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt apiHandler.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub
+        - arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${apiGateway}/*/*/routers
+        - apiGateway: !Ref apiGateway
+
+  ## =================== API Gateway ===================
+  apiGateway:
+    Type: AWS::ApiGateway::RestApi
+    DependsOn: apiHandler
+    Properties:
+      Description: Cradlepoint API Gateway
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Name: cradlepoint
+      Policy: !Sub 
+        - '{"Version": "2012-10-17","Statement": [{"Effect": "Allow","Principal": "*","Action": "execute-api:Invoke","Resource": "arn:aws:execute-api:*:*:*/*/*/*"},{"Effect": "Deny","Principal": "*","Action": "execute-api:Invoke","Resource": "arn:aws:execute-api:*:*:*/*/*/*","Condition": {"NotIpAddress": {"aws:SourceIp": "${ipCidr}"}}}]}'
+        - ipCidr: !Ref IPWhitelist
+  apiGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref apiGateway
+      PathPart: routers
+      ParentId: !GetAtt apiGateway.RootResourceId
+  apiGatewayCorsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref apiGateway
+      ResourceId: !Ref apiGatewayResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      ApiKeyRequired: false
+      RequestParameters: {}
+      MethodResponses: 
+        - 
+          ResponseModels: 
+              "application/json": !Ref apiGatewayModel
+          ResponseParameters: 
+              "method.response.header.Access-Control-Allow-Headers": false
+              "method.response.header.Access-Control-Allow-Methods": false
+              "method.response.header.Access-Control-Allow-Origin": false
+          StatusCode: "200"
+      Integration: 
+          CacheNamespace: !Ref apiGatewayResource
+          IntegrationResponses: 
+            - 
+              ResponseParameters: 
+                  "method.response.header.Access-Control-Allow-Headers": "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token'"
+                  "method.response.header.Access-Control-Allow-Methods": "'DELETE,GET,HEAD,OPTIONS,PATCH,POST,PUT'"
+                  "method.response.header.Access-Control-Allow-Origin": "'*'"
+              ResponseTemplates: {}
+              StatusCode: 200
+          PassthroughBehavior: WHEN_NO_MATCH
+          RequestTemplates: 
+              "application/json": "{\"statusCode\": 200}"
+          TimeoutInMillis: 29000
+          Type: MOCK
+
+  apiGatewayPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+        RestApiId: !Ref apiGateway
+        ResourceId: !Ref apiGatewayResource
+        HttpMethod: "POST"
+        AuthorizationType: "NONE"
+        ApiKeyRequired: false
+        RequestParameters: {}
+        MethodResponses: 
+          - 
+            ResponseModels: 
+                "application/json": !Ref apiGatewayModel
+            StatusCode: "200"
+        Integration: 
+            CacheNamespace: !Ref apiGatewayResource
+            ContentHandling: CONVERT_TO_TEXT
+            IntegrationHttpMethod: POST
+            IntegrationResponses: 
+              - 
+                ResponseTemplates: {}
+                StatusCode: 200
+            PassthroughBehavior: WHEN_NO_MATCH
+            TimeoutInMillis: 29000
+            Type: AWS_PROXY
+            Uri: !Sub
+              - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${lambdaArn}/invocations
+              - lambdaArn: !GetAtt apiHandler.Arn
+  apiGatewayModel:
+        Type: "AWS::ApiGateway::Model"
+        Properties:
+            RestApiId: !Ref apiGateway
+            Name: cradlepoint
+            Description: "This is a default empty schema model"
+            Schema: |
+                {
+                  "$schema": "http://json-schema.org/draft-04/schema#",
+                  "title" : "Empty Schema",
+                  "type" : "object"
+                }
+            ContentType: "application/json"
+  apiGatewayStage:
+        Type: "AWS::ApiGateway::Stage"
+        Properties:
+            StageName: cradlepoint
+            DeploymentId: !Ref apiGatewayDeployment
+            RestApiId: !Ref apiGateway
+            CacheClusterEnabled: false
+            TracingEnabled: false
+  apiGatewayDeployment:
+        Type: "AWS::ApiGateway::Deployment"
+        DependsOn: apiGatewayPostMethod
+        Properties:
+            RestApiId: !Ref apiGateway
+
